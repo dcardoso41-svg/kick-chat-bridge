@@ -6,7 +6,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@retconned/kick-js": "^1.0.0",
+    "@retconned/kick-js": "^0.5.3",
     "dotenv": "^16.4.5"
   },
   "engines": {
