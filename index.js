@@ -16,6 +16,11 @@
  * - !link <code>       → Link Kick account to web profile
  */
 
+// CRITICAL: Set Puppeteer env vars BEFORE any imports
+// This tells Puppeteer to use system Chromium instead of downloading its own
+process.env.PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = 'true';
+process.env.PUPPETEER_EXECUTABLE_PATH = '/usr/bin/chromium-browser';
+
 import { createClient } from '@retconned/kick-js';
 import 'dotenv/config';
 
@@ -222,20 +227,9 @@ async function main() {
 
   try {
     // Create client in read-only mode (no auth required)
-    // Configure browser options for Docker/Railway environment
     const client = createClient(config.kickChannel, {
       logger: false,
       readOnly: true,
-      browser: {
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser',
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--single-process',
-        ],
-      },
     });
 
     client.on('ready', () => {
