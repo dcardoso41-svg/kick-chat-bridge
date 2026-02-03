@@ -19,10 +19,30 @@
 // CRITICAL: Set Puppeteer env vars BEFORE any imports
 // This tells Puppeteer to use system Chromium instead of downloading its own
 process.env.PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = 'true';
+// Newer Puppeteer versions use this flag name
+process.env.PUPPETEER_SKIP_DOWNLOAD = 'true';
 process.env.PUPPETEER_EXECUTABLE_PATH = '/usr/bin/chromium-browser';
+// Ensure Puppeteer doesn't look in an unwritable/non-persistent location
+process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || '/tmp/puppeteer';
+
+// Crash diagnostics (Railway may only show "Crashed" unless we log the reason)
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] uncaughtException:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] unhandledRejection:', reason);
+  process.exit(1);
+});
+
+process.on('exit', (code) => {
+  console.log(`[EXIT] process exiting with code ${code}`);
+});
 
 import { createClient } from '@retconned/kick-js';
 import 'dotenv/config';
+import fs from 'node:fs';
 
 // ============================================================================
 // Configuration
@@ -98,7 +118,11 @@ async function handleVote(kickUserId, kickUsername, choice) {
     timestamp: new Date().toISOString(),
   });
 
-  console.log(`[VOTE] ${kickUsername} voted ${choice}: ${success ? (result?.message || 'OK') : 'FAILED'}`);
+  console.log(
+    `[VOTE] ${kickUsername} voted ${choice}: ${
+      success ? (result?.message || 'OK') : 'FAILED'
+    }`
+  );
 }
 
 async function handleBonusGuess(kickUserId, kickUsername, amount) {
@@ -115,7 +139,11 @@ async function handleBonusGuess(kickUserId, kickUsername, amount) {
     timestamp: new Date().toISOString(),
   });
 
-  console.log(`[BONUS] ${kickUsername} guessed ${amount}: ${success ? (result?.message || 'OK') : 'FAILED'}`);
+  console.log(
+    `[BONUS] ${kickUsername} guessed ${amount}: ${
+      success ? (result?.message || 'OK') : 'FAILED'
+    }`
+  );
 }
 
 async function handleAccountLink(kickUserId, kickUsername, code) {
@@ -129,7 +157,9 @@ async function handleAccountLink(kickUserId, kickUsername, code) {
   if (success) {
     console.log(`[LINK] ${kickUsername} linked successfully: ${result?.message}`);
   } else {
-    console.log(`[LINK] ${kickUsername} link failed: ${result?.message || result?.error || 'Unknown error'}`);
+    console.log(
+      `[LINK] ${kickUsername} link failed: ${result?.message || result?.error || 'Unknown error'}`
+    );
   }
 }
 
@@ -225,11 +255,77 @@ async function main() {
   console.log('════════════════════════════════════════════════════════════════');
   console.log('');
 
+  // Heartbeat so we can tell if the process stays alive vs. dying silently
+  const startedAt = Date.now();
+  const heartbeat = setInterval(() => {
+    const uptimeSec = Math.round((Date.now() - startedAt) / 1000);
+    console.log(`[HEARTBEAT] uptime=${uptimeSec}s`);
+  }, 30_000);
+  heartbeat.unref?.();
+
+  // Runtime diagnostics (helps confirm whether Railway is honoring Dockerfile USER)
   try {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 'n/a';
+    const gid = typeof process.getgid === 'function' ? process.getgid() : 'n/a';
+    console.log(`  Runtime UID: ${uid}  GID: ${gid}`);
+    console.log(`  Node Env:    ${process.env.NODE_ENV || 'undefined'}`);
+  } catch {
+    // ignore
+  }
+
+  try {
+    // Resolve the actual system Chromium path (Alpine images may use /usr/bin/chromium)
+    const candidatePaths = [
+      process.env.PUPPETEER_EXECUTABLE_PATH,
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+    ].filter(Boolean);
+
+    const chromiumPath = candidatePaths.find((p) => {
+      try {
+        return fs.existsSync(p);
+      } catch {
+        return false;
+      }
+    });
+
+    if (!chromiumPath) {
+      console.error(`❌ Could not find system Chromium. Tried: ${candidatePaths.join(', ')}`);
+    } else {
+      // Keep env var aligned with what we actually found
+      process.env.PUPPETEER_EXECUTABLE_PATH = chromiumPath;
+      console.log(`  Chromium:    ${chromiumPath}`);
+    }
+
+    const launchArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-zygote',
+      '--single-process',
+    ];
+
+    console.log(`  Launch args: ${launchArgs.join(' ')}`);
+
     // Create client in read-only mode (no auth required)
     const client = createClient(config.kickChannel, {
       logger: false,
       readOnly: true,
+      // Some versions of kick-js forward these options to puppeteer.launch.
+      // Supplying multiple common keys increases compatibility across versions.
+      puppeteer: {
+        executablePath: chromiumPath,
+        args: launchArgs,
+      },
+      browser: {
+        executablePath: chromiumPath,
+        args: launchArgs,
+      },
+      launchOptions: {
+        executablePath: chromiumPath,
+        args: launchArgs,
+      },
     });
 
     client.on('ready', () => {
@@ -255,7 +351,6 @@ async function main() {
       console.log('\n👋 Shutting down...');
       process.exit(0);
     });
-
   } catch (error) {
     console.error('❌ Failed to connect:', error.message);
     process.exit(1);
