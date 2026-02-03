@@ -13,16 +13,19 @@ RUN apk add --no-cache \
 
 # Tell Puppeteer to skip downloading Chrome and use the installed Chromium
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+ENV PUPPETEER_CACHE_DIR=/tmp/puppeteer
 
-# Copy package files
+# Create a non-root user to run Chromium (fixes sandbox error)
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
 COPY package*.json ./
-
-# Install dependencies
 RUN npm install --omit=dev
 
-# Copy source
 COPY index.js ./
 
-# Run the bridge
+# Switch to non-root user
+USER appuser
+
 CMD ["node", "index.js"]
