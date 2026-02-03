@@ -52,6 +52,9 @@ const config = {
   kickChannel: process.env.KICK_CHANNEL || 'dylangg',
   webhookSecret: process.env.WEBHOOK_SECRET,
   supabaseUrl: process.env.SUPABASE_URL || 'https://idpcknsxscpqquguuffi.supabase.co',
+  supabaseAnonKey: process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlkcGNrbnN4c2NwcXF1Z3V1ZmZpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk3OTE2NTIsImV4cCI6MjA4NTM2NzY1Mn0.S05XDTWtab0H1xA55YFhBe7xHFRVEVGO_eoqRjbcPmA',
+  // How often to check for active voting (only polls when a live event exists)
+  syncIntervalMs: 30_000, // 30 seconds
 };
 
 if (!config.webhookSecret) {
@@ -60,11 +63,103 @@ if (!config.webhookSecret) {
 }
 
 // ============================================================================
-// Active State (controlled via admin commands or external API)
+// Active State (auto-synced from database when event is live)
 // ============================================================================
 
 let activeMatchId = null;
 let activeBonusRoundId = null;
+let lastSyncLog = '';
+
+// ============================================================================
+// Auto-Sync: Poll database for active voting match/bonus
+// ============================================================================
+
+async function syncActiveState() {
+  try {
+    // First check if there's a live event
+    const eventsRes = await fetch(
+      `${config.supabaseUrl}/rest/v1/event_nights?status=eq.live&select=id`,
+      {
+        headers: {
+          'apikey': config.supabaseAnonKey,
+          'Authorization': `Bearer ${config.supabaseAnonKey}`,
+        },
+      }
+    );
+    
+    if (!eventsRes.ok) {
+      console.error('[SYNC] Failed to fetch events:', eventsRes.status);
+      return;
+    }
+    
+    const liveEvents = await eventsRes.json();
+    
+    if (!liveEvents || liveEvents.length === 0) {
+      // No live event - clear active state and skip further polling
+      if (activeMatchId || activeBonusRoundId) {
+        activeMatchId = null;
+        activeBonusRoundId = null;
+        console.log('[SYNC] No live event - cleared active state');
+      }
+      return;
+    }
+    
+    const liveEventId = liveEvents[0].id;
+    
+    // Check for voting match
+    const matchesRes = await fetch(
+      `${config.supabaseUrl}/rest/v1/matches?event_night_id=eq.${liveEventId}&status=eq.voting&select=id`,
+      {
+        headers: {
+          'apikey': config.supabaseAnonKey,
+          'Authorization': `Bearer ${config.supabaseAnonKey}`,
+        },
+      }
+    );
+    
+    if (matchesRes.ok) {
+      const votingMatches = await matchesRes.json();
+      const newMatchId = votingMatches.length > 0 ? votingMatches[0].id : null;
+      
+      if (newMatchId !== activeMatchId) {
+        activeMatchId = newMatchId;
+        if (newMatchId) {
+          console.log(`[SYNC] Active match set to: ${newMatchId}`);
+        } else {
+          console.log('[SYNC] No match currently in voting');
+        }
+      }
+    }
+    
+    // Check for voting bonus round
+    const bonusRes = await fetch(
+      `${config.supabaseUrl}/rest/v1/bonus_rounds?event_night_id=eq.${liveEventId}&status=eq.voting&select=id`,
+      {
+        headers: {
+          'apikey': config.supabaseAnonKey,
+          'Authorization': `Bearer ${config.supabaseAnonKey}`,
+        },
+      }
+    );
+    
+    if (bonusRes.ok) {
+      const votingBonus = await bonusRes.json();
+      const newBonusId = votingBonus.length > 0 ? votingBonus[0].id : null;
+      
+      if (newBonusId !== activeBonusRoundId) {
+        activeBonusRoundId = newBonusId;
+        if (newBonusId) {
+          console.log(`[SYNC] Active bonus round set to: ${newBonusId}`);
+        } else {
+          console.log('[SYNC] No bonus round currently in voting');
+        }
+      }
+    }
+    
+  } catch (error) {
+    console.error('[SYNC] Error syncing state:', error.message);
+  }
+}
 
 // ============================================================================
 // Command Patterns
@@ -74,7 +169,7 @@ const VOTE_PATTERN = /^!(?:vote\s*)?([12])$/i;
 const GUESS_PATTERN = /^!guess\s+(\d+(?:\.\d+)?)$/i;
 const LINK_PATTERN = /^!link\s+([A-Z0-9]{6})$/i;
 
-// Admin commands (restrict to specific users if needed)
+// Admin commands (still available as manual override)
 const SET_MATCH_PATTERN = /^!setmatch\s+(.+)$/i;
 const SET_BONUS_PATTERN = /^!setbonus\s+(.+)$/i;
 
@@ -196,19 +291,19 @@ function processMessage(message) {
     return;
   }
 
-  // Admin: Set active match
+  // Admin: Set active match (manual override)
   const setMatchMatch = text.match(SET_MATCH_PATTERN);
   if (setMatchMatch) {
     activeMatchId = setMatchMatch[1].trim();
-    console.log(`[ADMIN] Active match set to: ${activeMatchId}`);
+    console.log(`[ADMIN] Active match manually set to: ${activeMatchId}`);
     return;
   }
 
-  // Admin: Set active bonus round
+  // Admin: Set active bonus round (manual override)
   const setBonusMatch = text.match(SET_BONUS_PATTERN);
   if (setBonusMatch) {
     activeBonusRoundId = setBonusMatch[1].trim();
-    console.log(`[ADMIN] Active bonus round set to: ${activeBonusRoundId}`);
+    console.log(`[ADMIN] Active bonus round manually set to: ${activeBonusRoundId}`);
     return;
   }
 
@@ -239,6 +334,7 @@ async function main() {
   console.log('');
   console.log(`  Channel:     ${config.kickChannel}`);
   console.log(`  Webhook URL: ${config.supabaseUrl}`);
+  console.log(`  Auto-sync:   Every ${config.syncIntervalMs / 1000}s (only when live)`);
   console.log('');
   console.log('  Commands:');
   console.log('    !vote 1 / !1      Vote for Game 1');
@@ -246,7 +342,7 @@ async function main() {
   console.log('    !guess <amount>   Bonus round guess');
   console.log('    !link <CODE>      Link Kick to web account');
   console.log('');
-  console.log('  Admin:');
+  console.log('  Admin (manual override):');
   console.log('    !setmatch <id>    Set active match UUID');
   console.log('    !setbonus <id>    Set active bonus round UUID');
   console.log('    !clearmatch       Clear active match');
@@ -259,9 +355,16 @@ async function main() {
   const startedAt = Date.now();
   const heartbeat = setInterval(() => {
     const uptimeSec = Math.round((Date.now() - startedAt) / 1000);
-    console.log(`[HEARTBEAT] uptime=${uptimeSec}s`);
-  }, 30_000);
+    const status = activeMatchId ? `match=${activeMatchId.slice(0,8)}...` : 'no active match';
+    console.log(`[HEARTBEAT] uptime=${uptimeSec}s ${status}`);
+  }, 60_000);
   heartbeat.unref?.();
+
+  // Start auto-sync polling
+  console.log('[SYNC] Starting auto-sync...');
+  await syncActiveState(); // Initial sync
+  const syncInterval = setInterval(syncActiveState, config.syncIntervalMs);
+  syncInterval.unref?.();
 
   // Runtime diagnostics (helps confirm whether Railway is honoring Dockerfile USER)
   try {
@@ -349,6 +452,8 @@ async function main() {
     // Keep the process running
     process.on('SIGINT', () => {
       console.log('\n👋 Shutting down...');
+      clearInterval(syncInterval);
+      clearInterval(heartbeat);
       process.exit(0);
     });
   } catch (error) {
